@@ -1,54 +1,52 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 
-use core::time::Duration;
+//! An example illustrating how to trace run queue latency using BPF.
 
-use anyhow::{bail, Result};
+use std::mem::MaybeUninit;
+use std::str;
+use std::time::Duration;
+
+use anyhow::Result;
 use clap::Parser;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::Skel;
+use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::PerfBufferBuilder;
 use plain::Plain;
 use time::macros::format_description;
 use time::OffsetDateTime;
 
 mod runqslower {
-    include!(concat!(env!("OUT_DIR"), "/runqslower.skel.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bpf/runqslower.skel.rs"
+    ));
 }
 
+#[allow(clippy::wildcard_imports)]
 use runqslower::*;
 
 /// Trace high run queue latency
 #[derive(Debug, Parser)]
 struct Command {
     /// Trace latency higher than this value
-    #[clap(default_value = "10000")]
+    #[arg(default_value = "10000")]
     latency: u64,
     /// Process PID to trace
-    #[clap(default_value = "0")]
+    #[arg(default_value = "0")]
     pid: i32,
     /// Thread TID to trace
-    #[clap(default_value = "0")]
+    #[arg(default_value = "0")]
     tid: i32,
     /// Verbose debug output
-    #[clap(short, long)]
+    #[arg(short, long)]
     verbose: bool,
 }
 
-unsafe impl Plain for runqslower_bss_types::event {}
-
-fn bump_memlock_rlimit() -> Result<()> {
-    let rlimit = libc::rlimit {
-        rlim_cur: 128 << 20,
-        rlim_max: 128 << 20,
-    };
-
-    if unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlimit) } != 0 {
-        bail!("Failed to increase rlimit");
-    }
-
-    Ok(())
-}
+unsafe impl Plain for runqslower::types::event {}
 
 fn handle_event(_cpu: i32, data: &[u8]) {
-    let mut event = runqslower_bss_types::event::default();
+    let mut event = runqslower::types::event::default();
     plain::copy_from_bytes(&mut event, data).expect("Data buffer was too short");
 
     let now = if let Ok(now) = OffsetDateTime::now_local() {
@@ -59,7 +57,7 @@ fn handle_event(_cpu: i32, data: &[u8]) {
         "00:00:00".to_string()
     };
 
-    let task = std::str::from_utf8(&event.task).unwrap();
+    let task = str::from_utf8(&event.task).unwrap();
 
     println!(
         "{:8} {:16} {:<7} {:<14}",
@@ -82,13 +80,18 @@ fn main() -> Result<()> {
         skel_builder.obj_builder.debug(true);
     }
 
-    bump_memlock_rlimit()?;
-    let mut open_skel = skel_builder.open()?;
+    let mut open_object = MaybeUninit::uninit();
+    let mut open_skel = skel_builder.open(&mut open_object)?;
+    let rodata = open_skel
+        .maps
+        .rodata_data
+        .as_deref_mut()
+        .expect("`rodata` is not memory mapped");
 
     // Write arguments into prog
-    open_skel.rodata().min_us = opts.latency;
-    open_skel.rodata().targ_pid = opts.pid;
-    open_skel.rodata().targ_tgid = opts.tid;
+    rodata.min_us = opts.latency;
+    rodata.targ_pid = opts.pid;
+    rodata.targ_tgid = opts.tid;
 
     // Begin tracing
     let mut skel = open_skel.load()?;
@@ -96,7 +99,7 @@ fn main() -> Result<()> {
     println!("Tracing run queue latency higher than {} us", opts.latency);
     println!("{:8} {:16} {:7} {:14}", "TIME", "COMM", "TID", "LAT(us)");
 
-    let perf = PerfBufferBuilder::new(skel.maps_mut().events())
+    let perf = PerfBufferBuilder::new(&skel.maps.events)
         .sample_cb(handle_event)
         .lost_cb(handle_lost_events)
         .build()?;

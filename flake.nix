@@ -22,20 +22,30 @@
         ];
       in
       {
-        packages.default = (naersk.lib.${system}.override {
-          cargo = toolchain;
-          rustc = toolchain;
-        }).buildPackage {
+        # packages.default = (naersk.lib.${system}.override {
+        #   cargo = toolchain;
+        #   rustc = toolchain;
+        # }).buildPackage
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          name = "bpfscheduler";
+          version = "0.1.0";
+          cargoHash = "sha256-aR2C+ftiRLb9tfiYkblT05EwKV3SjLUiHtlvA8LrV/M=";
           hardeningDisable = [ "all" ];
           buildInputs = with pkgs; [
-            llvmPackages_20.clang-unwrapped
             zlib
+            elfutils.dev
             elfutils.out
+            libbpf
           ];
+
           nativeBuildInputs = with pkgs; [
+            rustPlatform.bindgenHook
             pkg-config
-            patchelf
+            llvmPackages_20.clang-unwrapped
           ];
+          preBuild = ''
+            export LD_LIBRARY_PATH=${pkgs.elfutils.out}/lib
+          '';
           src = ./.;
         };
 
@@ -48,9 +58,6 @@
             elfutils
             pkg-config
           ];
-          shellHook = ''
-            export LD_LIBRARY_PATH=${pkgs.elfutils.out}/lib:${pkgs.zlib}/lib:${pkgs.libbpf}/lib:$LD_LIBRARY_PATH
-          '';
         };
       });
 }
