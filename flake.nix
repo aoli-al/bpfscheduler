@@ -32,6 +32,7 @@
             elfutils.dev
             elfutils.out
             libbpf
+            bear
           ];
 
           nativeBuildInputs = with pkgs; [
@@ -48,6 +49,7 @@
         devShells.default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
           shellHook = ''
+            unset NIX_HARDENING_ENABLE
             export LD_LIBRARY_PATH=${pkgs.elfutils.out}/lib
           '';
         };
