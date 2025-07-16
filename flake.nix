@@ -1,27 +1,19 @@
 {
   inputs = {
     nixpkgs.url = "nixpkgs/nixos-unstable";
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, fenix, flake-utils, nixpkgs }:
+  outputs = { self, rust-overlay, flake-utils, nixpkgs }:
     flake-utils.lib.eachDefaultSystem (system: 
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-        toolchain = with fenix.packages.${system}; combine [
-          minimal.cargo
-          minimal.rustc
-        ];
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs {
+          inherit system overlays;
+        };
       in
       {
-        # packages.default = (naersk.lib.${system}.override {
-        #   cargo = toolchain;
-        #   rustc = toolchain;
-        # }).buildPackage
         packages.default = pkgs.rustPlatform.buildRustPackage {
           name = "bpfscheduler";
           version = "0.1.0";
@@ -33,6 +25,9 @@
             elfutils.out
             libbpf
             bear
+            (rust-bin.stable.latest.default.override {
+              extensions = ["rust-src" "rust-analyzer"];
+            })
           ];
 
           nativeBuildInputs = with pkgs; [
@@ -51,6 +46,7 @@
           shellHook = ''
             unset NIX_HARDENING_ENABLE
             export LD_LIBRARY_PATH=${pkgs.elfutils.out}/lib
+            export RUST_SRC_PATH="${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
           '';
         };
       });

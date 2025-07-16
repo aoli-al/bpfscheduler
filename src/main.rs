@@ -1,34 +1,135 @@
-// Copyright (c) Meta Platforms, Inc. and affiliates.
+mod bpf_skel;
+use std::mem::MaybeUninit;
+use std::process::Command;
+use std::sync::Arc;
+use std::sync::Condvar;
+use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
-// This software may be used and distributed according to the terms of the
-// GNU General Public License version 2.
-use scx_chaos::run;
-use scx_chaos::Args;
-
+use anyhow::Context;
+pub use bpf_skel::*;
+use anyhow::Result;
 use clap::Parser;
+use log::info;
+use nix::unistd::Pid;
+use scx_utils::scx_ops_attach;
+use scx_utils::scx_ops_load;
+use scx_utils::scx_ops_open;
+use libbpf_rs::OpenObject;
 
-fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
 
-    let llv = match &args.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
+#[derive(Debug, clap::Parser)]
+#[command(
+    name = "scx_cosmos",
+    version,
+    disable_version_flag = true,
+    about = "Lightweight scheduler optimized for preserving task-to-CPU locality."
+)]
+struct Opts {
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        help_heading = "Test Command"
+    )]
+    pub args: Vec<String>,
+}
 
-    simplelog::TermLogger::init(
-        llv,
-        simplelog::ConfigBuilder::new()
-            .set_time_offset_to_local()
-            .expect("Failed to set local time offset")
-            .set_time_level(simplelog::LevelFilter::Error)
-            .set_location_level(simplelog::LevelFilter::Off)
-            .set_target_level(simplelog::LevelFilter::Off)
-            .set_thread_level(simplelog::LevelFilter::Off)
-            .build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
+struct Scheduler<'a> {
+    skel: BpfSkel<'a>,
+    opts: &'a Opts,
+    struct_ops: Option<libbpf_rs::Link>,
+}
 
-    run(args)
+impl<'a> Scheduler<'a> {
+    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        let mut skel_builder = BpfSkelBuilder::default();
+        skel_builder.obj_builder.debug(true);
+        let mut skel = scx_ops_open!(skel_builder, open_object, simple_ops)?;
+        skel.struct_ops.simple_ops_mut().exit_dump_len = 0;
+        skel.maps.rodata_data.ppid_targeting_ppid = Pid::this().as_raw();
+
+        let mut skel = scx_ops_load!(skel, simple_ops, uei)?;
+        let struct_ops = Some(scx_ops_attach!(skel, simple_ops)?);
+
+        Ok(Self { 
+            skel, 
+            opts, 
+            struct_ops 
+        })
+    }
+
+    pub fn observe(
+        &self,
+        shutdown: &(Mutex<bool>, Condvar),
+    ) -> Result<()> {
+        let (lock, cvar) = shutdown;
+        let mut guard = lock.lock().unwrap();
+        while !*guard {
+            guard = cvar
+                .wait_timeout(guard, Duration::from_millis(100))
+                .unwrap()
+                .0;
+        }
+        Ok(())
+    }
+}
+
+
+fn main() -> Result<()> {
+    let opts = Arc::new(Opts::parse());
+    let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
+
+    ctrlc::set_handler({
+        let shutdown = shutdown.clone();
+        move || {
+            let (lock, cvar) = &*shutdown;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+    })
+    .context("Error setting Ctrl-C handler")?;
+
+    let scheduler_thread = thread::spawn({
+        let opts = opts.clone();
+        let shutdown = shutdown.clone();
+        move || -> Result<()> {
+            let mut open_object = MaybeUninit::uninit();
+            let sched= Scheduler::init(&opts, &mut open_object)?;
+            sched.observe(&shutdown)?;
+            Ok(())
+        }
+    });
+
+    let (cmd, vargs) = opts.args.split_first().unwrap();
+
+    let mut should_run_app = true;
+        while should_run_app {
+
+        let mut child = Command::new(cmd).args(vargs).spawn()?;
+        loop {
+            should_run_app &= !*shutdown.0.lock().unwrap();
+
+            if scheduler_thread.is_finished() {
+                child.kill()?;
+                break;
+            }
+            if let Some(s) = child.try_wait()? {
+                if s.success() {
+                    should_run_app &= !*shutdown.0.lock().unwrap();
+                    if should_run_app {
+                        info!("app under test terminated successfully, restarting...");
+                    };
+                } else {
+                    info!("TODO: report what the scheduler was doing when it crashed");
+                    should_run_app = false;
+                };
+                break;
+            };
+
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    Ok(())
 }
