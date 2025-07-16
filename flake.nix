@@ -6,13 +6,9 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
-    naersk = {
-      url = "github:nix-community/naersk";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, fenix, flake-utils, naersk, nixpkgs }:
+  outputs = { self, fenix, flake-utils, nixpkgs }:
     flake-utils.lib.eachDefaultSystem (system: 
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -29,7 +25,7 @@
         packages.default = pkgs.rustPlatform.buildRustPackage {
           name = "bpfscheduler";
           version = "0.1.0";
-          cargoHash = "sha256-aR2C+ftiRLb9tfiYkblT05EwKV3SjLUiHtlvA8LrV/M=";
+          cargoHash = "sha256-Dapq2pu1ojD78E8MlATXzVuwhpTLHNpW4u78L/rnP34=";
           hardeningDisable = [ "all" ];
           buildInputs = with pkgs; [
             zlib
@@ -41,23 +37,19 @@
           nativeBuildInputs = with pkgs; [
             rustPlatform.bindgenHook
             pkg-config
-            llvmPackages_20.clang-unwrapped
+            llvmPackages_20.clang
+            # llvmPackages_20.clang.lib
+            llvmPackages_20.clang-tools  
+            linuxHeaders
           ];
-          preBuild = ''
-            export LD_LIBRARY_PATH=${pkgs.elfutils.out}/lib
-          '';
           src = ./.;
         };
 
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            toolchain
-            llvmPackages_20.clang-unwrapped
-            zlib
-            libbpf
-            elfutils
-            pkg-config
-          ];
+          inputsFrom = [ self.packages.${system}.default ];
+          shellHook = ''
+            export LD_LIBRARY_PATH=${pkgs.elfutils.out}/lib
+          '';
         };
       });
 }

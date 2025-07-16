@@ -1,0 +1,22 @@
+[
+  {
+    "arguments": [
+     "/nix/store/qng669pg52f1j78qlghlvql9whrnw01j-clang-20.1.6/bin/clang",
+      "-I",
+      "/home/aoli/repos/bpfscheduler/src/bpf",
+      "-I",
+      "/home/aoli/repos/bpfscheduler/target/debug/build/libbpf-sys-926ca012e0c0ad0b/out/include",
+      "-fno-stack-protector",
+      "-D__TARGET_ARCH_x86",
+      "-g",
+      "-O2",
+      "-target",
+      "bpf",
+      "-c",
+      "src/bpf/runqslower.bpf.c"
+    ],
+    "directory": "/home/aoli/repos/bpfscheduler",
+    "file": "/home/aoli/repos/bpfscheduler/src/bpf/runqslower.bpf.c",
+    "output": "src/bpf/runqslower.bpf.o"
+  }
+]
