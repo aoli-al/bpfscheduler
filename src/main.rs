@@ -49,12 +49,12 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(true);
-        let mut skel = scx_ops_open!(skel_builder, open_object, simple_ops)?;
-        skel.struct_ops.simple_ops_mut().exit_dump_len = 0;
+        let mut skel = scx_ops_open!(skel_builder, open_object, cct_ops)?;
+        skel.struct_ops.cct_ops_mut().exit_dump_len = 0;
         skel.maps.rodata_data.ppid_targeting_ppid = Pid::this().as_raw();
 
-        let mut skel = scx_ops_load!(skel, simple_ops, uei)?;
-        let struct_ops = Some(scx_ops_attach!(skel, simple_ops)?);
+        let mut skel = scx_ops_load!(skel, cct_ops, uei)?;
+        let struct_ops = Some(scx_ops_attach!(skel, cct_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self { 
@@ -123,6 +123,7 @@ fn main() -> Result<()> {
             if let Some(s) = child.try_wait()? {
                 if s.success() {
                     should_run_app &= !*shutdown.0.lock().unwrap();
+                    should_run_app &= false;
                     if should_run_app {
                         info!("app under test terminated successfully, restarting...");
                     };

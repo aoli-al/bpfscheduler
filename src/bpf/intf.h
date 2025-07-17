@@ -10,12 +10,12 @@ enum cct_consts {
 };
 
 enum cct_match {
-	CCT_MATCH_UNKNOWN		= 0,
-	CCT_MATCH_COMPLETE		= 1 << 0,
-	CCT_MATCH_CONTROLLED	= 1 << 1,
-	CCT_MATCH_NOT_CONTROLLED	= 1 << 2,
+	CCT_MATCH_UNKNOWN			= 0,
+	CCT_MATCH_COMPLETE			= 1 << 0,
+	CCT_MATCH_NOT_CONTROLLED	= 1 << 1,
+	CCT_MATCH_HAS_PARENT		= 1 << 2,
 
-	CCT_MATCH_MAX			= 1 << 3,
+	CCT_MATCH_MAX				= 1 << 3,
 };
 
 struct cct_task_ctx {
