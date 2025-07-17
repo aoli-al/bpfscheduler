@@ -7,16 +7,19 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+mod stats;
 use anyhow::Context;
 pub use bpf_skel::*;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
 use nix::unistd::Pid;
+use scx_stats::StatsServer;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use libbpf_rs::OpenObject;
+use stats::Metrics;
 
 
 #[derive(Debug, clap::Parser)]
@@ -39,6 +42,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     opts: &'a Opts,
     struct_ops: Option<libbpf_rs::Link>,
+    stats_server: StatsServer<(), Metrics>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -51,11 +55,13 @@ impl<'a> Scheduler<'a> {
 
         let mut skel = scx_ops_load!(skel, simple_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, simple_ops)?);
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self { 
             skel, 
             opts, 
-            struct_ops 
+            struct_ops,
+            stats_server
         })
     }
 

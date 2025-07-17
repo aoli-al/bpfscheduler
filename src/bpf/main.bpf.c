@@ -20,13 +20,14 @@
  * Copyright (c) 2022 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
+
 #include <scx/common.bpf.h>
+#include "intf.h"
 
 char _license[] SEC("license") = "GPL";
 
 const volatile bool fifo_sched;
 const volatile int ppid_targeting_ppid = 1;
-const volatile bool ppid_targeting_inclusive = false;
 
 static u64 vtime_now;
 UEI_DEFINE(uei);
@@ -46,6 +47,143 @@ struct {
 	__uint(value_size, sizeof(u64));
 	__uint(max_entries, 2);			/* [local, global] */
 } stats SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct cct_task_ctx);
+} controlled_task_ctxs SEC(".maps");
+
+
+struct cct_task_ctx *lookup_create_controlled_task_ctx(struct task_struct *p)
+{
+	return bpf_task_storage_get(&controlled_task_ctxs, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
+}
+
+
+static __always_inline s32 calculate_control_match(struct task_struct *p)
+{
+	struct cct_task_ctx *taskc;
+	struct task_struct *p2;
+	enum cct_match flags = 0;
+	int found_parent = 0;
+	int ret = 0;
+	int pid;
+
+	if (!(taskc = lookup_create_controlled_task_ctx(p))) {
+		scx_bpf_error("couldn't create task context");
+		return -EINVAL;
+	}
+
+	// set one bit so we can check this step has been completed.
+	taskc->match |= CONTROL_MATCH_COMPLETE;
+
+	// no ppid targeting is covered by everything having CHAOS_MATCH_COMPLETE only
+	if (ppid_targeting_ppid == -1)
+		return 0;
+
+	// no need for the path-to-root walk, this is the task
+	if (ppid_targeting_ppid == p->pid) {
+		taskc->match |= CONTROL_MATCH_NOT_CONTROLLED;
+		return 0;
+	}
+
+	// we are matching on parent. if this task doesn't have one, exclude.
+	if (!p->real_parent || !(pid = p->real_parent->pid)) {
+		taskc->match |= CONTROL_MATCH_NOT_CONTROLLED;
+		return 0;
+	}
+
+	// walk the real_parent path-to-root to check for the HAS_PARENT match
+	bpf_repeat(CCT_NUM_PPIDS_CHECK) {
+		p2 = bpf_task_from_pid(pid);
+		if (!p2)
+			break;
+
+		if (!(taskc = lookup_create_chaos_task_ctx(p2))) {
+			bpf_task_release(p2);
+			scx_bpf_error("couldn't create task context");
+			ret = -EINVAL;
+			goto out;
+		}
+
+		// parent is matched and is in the parent path
+		if (taskc->match & CHAOS_MATCH_HAS_PARENT) {
+			flags |= CHAOS_MATCH_HAS_PARENT;
+			found_parent = pid;
+			bpf_task_release(p2);
+			break;
+		}
+
+		// found the parent
+		if (p2->pid == ppid_targeting_ppid) {
+			flags |= CHAOS_MATCH_HAS_PARENT;
+			found_parent = pid;
+			bpf_task_release(p2);
+			break;
+		}
+
+		// parent is matched and is not in the parent path
+		if (taskc->match) {
+			found_parent = pid;
+			bpf_task_release(p2);
+			break;
+		}
+
+		if (!p2->real_parent || !(pid = p2->real_parent->pid)) {
+			bpf_task_release(p2);
+			break;
+		}
+
+		bpf_task_release(p2);
+	}
+
+	if (!(flags & CHAOS_MATCH_HAS_PARENT))
+		flags |= CHAOS_MATCH_EXCLUDED;
+
+	if (!(taskc = lookup_create_chaos_task_ctx(p))) {
+		scx_bpf_error("couldn't create task context");
+		return -EINVAL;
+	}
+	taskc->match |= flags;
+
+	if (!p->real_parent || !(pid = p->real_parent->pid))
+		return 0;
+
+	bpf_repeat(CHAOS_NUM_PPIDS_CHECK) {
+		p2 = bpf_task_from_pid(pid);
+		if (!p2)
+			break;
+
+		if (!(taskc = lookup_create_chaos_task_ctx(p2))) {
+			bpf_task_release(p2);
+			scx_bpf_error("couldn't create task context");
+			ret = -EINVAL;
+			goto out;
+		}
+
+		if (pid == found_parent) {
+			bpf_task_release(p2);
+			break;
+		}
+
+		taskc->match |= flags;
+
+		if (!p2->real_parent || !(pid = p2->real_parent->pid)) {
+			bpf_task_release(p2);
+			break;
+		}
+
+		bpf_task_release(p2);
+	}
+
+out:
+	return ret;
+}
+
+
+
 
 static void stat_inc(u32 idx)
 {
@@ -138,7 +276,6 @@ void BPF_STRUCT_OPS(simple_enable, struct task_struct *p)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(simple_init)
 {
-	bpf_printk("Starting monitoring thread: %d", ppid_targeting_ppid);
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 
@@ -147,7 +284,7 @@ void BPF_STRUCT_OPS(simple_exit, struct scx_exit_info *ei)
 	UEI_RECORD(uei, ei);
 }
 
-SCX_OPS_DEFINE(simple_ops,
+SCX_OPS_DEFINE(cct_ops,
 	       .select_cpu		= (void *)simple_select_cpu,
 	       .enqueue			= (void *)simple_enqueue,
 	       .dispatch		= (void *)simple_dispatch,
@@ -156,4 +293,4 @@ SCX_OPS_DEFINE(simple_ops,
 	       .enable			= (void *)simple_enable,
 	       .init			= (void *)simple_init,
 	       .exit			= (void *)simple_exit,
-	       .name			= "simple");
+	       .name			= "cct");
