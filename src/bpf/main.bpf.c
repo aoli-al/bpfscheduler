@@ -189,31 +189,31 @@ out:
 
 static inline bool vtime_before(u64 a, u64 b) { return (s64)(a - b) < 0; }
 
-s32 BPF_STRUCT_OPS(cct_select_cpu, struct task_struct *p, s32 prev_cpu, u64
-wake_flags)
-{
-	bool is_idle = false;
-	s32 cpu;
-	struct cct_task_ctx *taskc;
+// s32 BPF_STRUCT_OPS(cct_select_cpu, struct task_struct *p, s32 prev_cpu, u64
+// wake_flags)
+// {
+// 	bool is_idle = false;
+// 	s32 cpu;
+// 	struct cct_task_ctx *taskc;
 
-	taskc = lookup_create_cct_task_ctx(p);
-	if (!(taskc = lookup_create_cct_task_ctx(p)))
-		goto out;
+// 	taskc = lookup_create_cct_task_ctx(p);
+// 	if (!(taskc = lookup_create_cct_task_ctx(p)))
+// 		goto out;
 
-	if (taskc->match & CCT_MATCH_HAS_PARENT) {
-		bpf_printk("task(%s) %d is being scheduled on CPU %d\n",
-			   p->comm, p->pid, prev_cpu);
-		return prev_cpu;
-	}
+// 	if (taskc->match & CCT_MATCH_HAS_PARENT) {
+// 		bpf_printk("task(%s) %d is being scheduled on CPU %d\n",
+// 			   p->comm, p->pid, prev_cpu);
+// 		return prev_cpu;
+// 	}
 
-out:
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
-	}
+// out:
+// 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+// 	if (is_idle) {
+// 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+// 	}
 
-	return cpu;
-}
+// 	return cpu;
+// }
 
 void BPF_STRUCT_OPS(cct_task_running, struct task_struct *p) {
   if (!p)
@@ -238,6 +238,20 @@ void BPF_STRUCT_OPS(cct_task_stopping, struct task_struct *p) {
   }
   if (taskc->match & CCT_MATCH_HAS_PARENT) {
 	bpf_printk("task(%s) %d is stopping in CCT\n", p->comm, p->pid);
+  }
+}
+
+void BPF_STRUCT_OPS(cct_task_quiescent, struct task_struct *p) {
+  if (!p)
+	return;
+  struct cct_task_ctx *taskc;
+  if (!(taskc = lookup_create_cct_task_ctx(p))) {
+	scx_bpf_error("couldn't create task context");
+	return;
+  }
+  if (taskc->match & CCT_MATCH_HAS_PARENT) {
+	bpf_printk("task(%s) %d is quiescing in CCT\n", p->comm, p->pid);
+	// scx_bpf_dsq_insert(p, CCT_DSQ, SCX_SLICE_DFL, SCX_ENQ_PREEMPT);
   }
 }
 
@@ -302,7 +316,7 @@ void BPF_STRUCT_OPS(cct_dispatch, s32 cpu, struct task_struct *prev) {
     bpf_for_each(scx_dsq, p, initial_dsq, 0) {
       struct bpf_iter_scx_dsq *iter = BPF_FOR_EACH_ITER;
       if (p->pid == highest_task_pid) {
-        scx_bpf_dsq_move(iter, p, SCX_DSQ_LOCAL_ON | cpu, SCX_OPS_ENQ_LAST);
+        scx_bpf_dsq_move(iter, p, SCX_DSQ_LOCAL_ON | cpu, SCX_ENQ_PREEMPT);
 		bpf_printk("Task %s (%d) moved to CCT_DSQ\n", p->comm, p->pid);
       }
     }
@@ -335,12 +349,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cct_init_task, struct task_struct *p,
 }
 
 SCX_OPS_DEFINE(cct_ops,
-				.select_cpu		= (void *)cct_select_cpu,
+				// .select_cpu		= (void *)cct_select_cpu,
                .enqueue = (void *)cct_enqueue,
                .running = (void *)cct_task_running,
 			   .stopping = (void *)cct_task_stopping,
-               .dispatch = (void *)cct_dispatch, .init = (void *)cct_init,
+			   .quiescent = (void *)cct_task_quiescent,
+               .dispatch = (void *)cct_dispatch, 
+			   .init = (void *)cct_init,
                .init_task = (void *)cct_init_task,
-               .tick = (void *)cct_task_tick, .exit = (void *)cct_exit,
+               .tick = (void *)cct_task_tick, 
+			   .exit = (void *)cct_exit,
 			   .flags = SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
                .name = "cct");
