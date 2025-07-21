@@ -115,7 +115,6 @@ fn main() -> Result<()> {
         let mut child = Command::new(cmd).args(vargs).spawn()?;
         loop {
             should_run_app &= !*shutdown.0.lock().unwrap();
-
             if scheduler_thread.is_finished() {
                 child.kill()?;
                 break;
@@ -123,7 +122,6 @@ fn main() -> Result<()> {
             if let Some(s) = child.try_wait()? {
                 if s.success() {
                     should_run_app &= !*shutdown.0.lock().unwrap();
-                    should_run_app &= false;
                     if should_run_app {
                         info!("app under test terminated successfully, restarting...");
                     };

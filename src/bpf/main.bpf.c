@@ -30,7 +30,7 @@ char _license[] SEC("license") = "GPL";
 
 const volatile int ppid_targeting_ppid = 1;
 
-static u64 vtime_now;
+static bool cct_task_is_running = 0;
 UEI_DEFINE(uei);
 
 /*
@@ -187,33 +187,29 @@ out:
   return ret;
 }
 
-static inline bool vtime_before(u64 a, u64 b) { return (s64)(a - b) < 0; }
+s32 BPF_STRUCT_OPS(cct_select_cpu, struct task_struct *p, s32 prev_cpu,
+                   u64 wake_flags) {
+  bool is_idle = false;
+  s32 cpu;
+  struct cct_task_ctx *taskc;
 
-// s32 BPF_STRUCT_OPS(cct_select_cpu, struct task_struct *p, s32 prev_cpu, u64
-// wake_flags)
-// {
-// 	bool is_idle = false;
-// 	s32 cpu;
-// 	struct cct_task_ctx *taskc;
+  taskc = lookup_create_cct_task_ctx(p);
+  if (!(taskc = lookup_create_cct_task_ctx(p)))
+    goto out;
 
-// 	taskc = lookup_create_cct_task_ctx(p);
-// 	if (!(taskc = lookup_create_cct_task_ctx(p)))
-// 		goto out;
+  if (taskc->match & CCT_MATCH_HAS_PARENT) {
+    bpf_printk("select_cpu: task(%s) %d is controlled by CCT", p->comm, p->pid);
+    return prev_cpu;
+  }
 
-// 	if (taskc->match & CCT_MATCH_HAS_PARENT) {
-// 		bpf_printk("task(%s) %d is being scheduled on CPU %d\n",
-// 			   p->comm, p->pid, prev_cpu);
-// 		return prev_cpu;
-// 	}
+out:
+  cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+  if (is_idle) {
+    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+  }
 
-// out:
-// 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-// 	if (is_idle) {
-// 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
-// 	}
-
-// 	return cpu;
-// }
+  return cpu;
+}
 
 void BPF_STRUCT_OPS(cct_task_running, struct task_struct *p) {
   if (!p)
@@ -224,39 +220,40 @@ void BPF_STRUCT_OPS(cct_task_running, struct task_struct *p) {
     return;
   }
   if (taskc->match & CCT_MATCH_HAS_PARENT) {
+    cct_task_is_running = true;
     bpf_printk("task(%s) %d is running in CCT\n", p->comm, p->pid);
   }
 }
 
 void BPF_STRUCT_OPS(cct_task_stopping, struct task_struct *p) {
   if (!p)
-	return;
+    return;
   struct cct_task_ctx *taskc;
   if (!(taskc = lookup_create_cct_task_ctx(p))) {
-	scx_bpf_error("couldn't create task context");
-	return;
+    scx_bpf_error("couldn't create task context");
+    return;
   }
   if (taskc->match & CCT_MATCH_HAS_PARENT) {
-	bpf_printk("task(%s) %d is stopping in CCT\n", p->comm, p->pid);
+    cct_task_is_running = false;
+    bpf_printk("task(%s) %d is stopping in CCT\n", p->comm, p->pid);
   }
 }
 
 void BPF_STRUCT_OPS(cct_task_quiescent, struct task_struct *p) {
   if (!p)
-	return;
+    return;
   struct cct_task_ctx *taskc;
   if (!(taskc = lookup_create_cct_task_ctx(p))) {
-	scx_bpf_error("couldn't create task context");
-	return;
+    scx_bpf_error("couldn't create task context");
+    return;
   }
   if (taskc->match & CCT_MATCH_HAS_PARENT) {
-	bpf_printk("task(%s) %d is quiescing in CCT\n", p->comm, p->pid);
-	// scx_bpf_dsq_insert(p, CCT_DSQ, SCX_SLICE_DFL, SCX_ENQ_PREEMPT);
+    bpf_printk("task(%s) %d is quiescing in CCT\n", p->comm, p->pid);
+    // scx_bpf_dsq_insert(p, CCT_DSQ, 10, SCX_ENQ_PREEMPT);
   }
 }
 
 void BPF_STRUCT_OPS(cct_enqueue, struct task_struct *p, u64 enq_flags) {
-
   struct cct_task_ctx *taskc;
   if (!(taskc = lookup_create_cct_task_ctx(p))) {
     scx_bpf_error("couldn't create task context");
@@ -264,35 +261,23 @@ void BPF_STRUCT_OPS(cct_enqueue, struct task_struct *p, u64 enq_flags) {
   }
 
   if (taskc->match & CCT_MATCH_HAS_PARENT) {
-	bpf_printk("task(%s) %d is being enqueued in CCT\n", p->comm, p->pid);
-    scx_bpf_dsq_insert(p, CCT_DSQ, 1000, enq_flags);
+    bpf_printk("task(%s) %d is being enqueued in CCT\n", p->comm, p->pid);
+    scx_bpf_dsq_insert(p, CCT_DSQ, SCX_SLICE_DFL, enq_flags);
   } else {
-    u64 vtime = p->scx.dsq_vtime;
-    if (vtime_before(vtime, vtime_now - SCX_SLICE_DFL))
-      vtime = vtime_now - SCX_SLICE_DFL;
-
-    scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, vtime, enq_flags);
-  }
-}
-
-void BPF_STRUCT_OPS(cct_task_tick, struct task_struct *p) {
-  if (p) {
-    struct cct_task_ctx *prev_taskc = lookup_create_cct_task_ctx(p);
-    if (prev_taskc && (prev_taskc->match & CCT_MATCH_HAS_PARENT) &&
-        bpf_get_prandom_u32() % 10 < 10) {
-    //   scx_bpf_dsq_insert(p, CCT_DSQ, SCX_SLICE_DFL, SCX_ENQ_PREEMPT);
-      //   scx_bpf_dispatch(p, CCT_DSQ, SCX_SLICE_DFL, SCX_ENQ_PREEMPT);
-
-      scx_bpf_kick_cpu(8, SCX_KICK_PREEMPT);
-    //   bpf_printk("Task %s (%d) kicked to CCT_DSQ\n", p->comm, p->pid);
-    }
+    scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, 10, 100, enq_flags);
   }
 }
 
 void BPF_STRUCT_OPS(cct_dispatch, s32 cpu, struct task_struct *prev) {
 
   if (cpu == 8) {
+    if (cct_task_is_running) {
+      bpf_printk("CCT is already running, skipping dispatch\n");
+      goto out;
+    }
+
     u32 cct_dsq_length = scx_bpf_dsq_nr_queued(CCT_DSQ);
+
     if (cct_dsq_length > 1) {
       bpf_printk("CCT_DSQ length: %u\n", cct_dsq_length);
     }
@@ -317,10 +302,11 @@ void BPF_STRUCT_OPS(cct_dispatch, s32 cpu, struct task_struct *prev) {
       struct bpf_iter_scx_dsq *iter = BPF_FOR_EACH_ITER;
       if (p->pid == highest_task_pid) {
         scx_bpf_dsq_move(iter, p, SCX_DSQ_LOCAL_ON | cpu, SCX_ENQ_PREEMPT);
-		bpf_printk("Task %s (%d) moved to CCT_DSQ\n", p->comm, p->pid);
+        bpf_printk("Task %s (%d) moved to CCT_DSQ\n", p->comm, p->pid);
       }
     }
   }
+out:
   scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
@@ -348,16 +334,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cct_init_task, struct task_struct *p,
   return 0;
 }
 
-SCX_OPS_DEFINE(cct_ops,
-				// .select_cpu		= (void *)cct_select_cpu,
+SCX_OPS_DEFINE(cct_ops, .select_cpu = (void *)cct_select_cpu,
                .enqueue = (void *)cct_enqueue,
                .running = (void *)cct_task_running,
-			   .stopping = (void *)cct_task_stopping,
-			   .quiescent = (void *)cct_task_quiescent,
-               .dispatch = (void *)cct_dispatch, 
-			   .init = (void *)cct_init,
-               .init_task = (void *)cct_init_task,
-               .tick = (void *)cct_task_tick, 
-			   .exit = (void *)cct_exit,
-			   .flags = SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
+               .stopping = (void *)cct_task_stopping,
+               .quiescent = (void *)cct_task_quiescent,
+               .dispatch = (void *)cct_dispatch, .init = (void *)cct_init,
+               .init_task = (void *)cct_init_task, .exit = (void *)cct_exit,
+               .flags = SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
                .name = "cct");
