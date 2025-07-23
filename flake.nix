@@ -33,9 +33,10 @@
           nativeBuildInputs = with pkgs; [
             rustPlatform.bindgenHook
             pkg-config
-            llvmPackages_20.clang
-            # llvmPackages_20.clang.lib
             llvmPackages_20.clang-tools  
+            llvmPackages_20.clang
+            llvmPackages_20.libcxx
+            # llvmPackages_20.clang.lib
             linuxHeaders
           ];
           src = ./.;
