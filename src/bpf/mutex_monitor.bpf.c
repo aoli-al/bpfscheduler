@@ -6,6 +6,7 @@
  * random delays before the actual lock operation.
  */
 
+#include "vmlinux.h"
 #include <linux/types.h>
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
@@ -86,8 +87,12 @@ int mutex_lock_entry(struct pt_regs *ctx)
 {
     if (!enable_monitoring)
         return 0;
-
     void *mutex = (void *)PT_REGS_PARM1(ctx);
+
+
+    struct task_struct *task = (void *)bpf_get_current_task();
+    task->scx.slice = 0;
+
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u32 tid = (__u32)pid_tgid;
