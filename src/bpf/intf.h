@@ -21,6 +21,7 @@ enum cct_match {
 struct cct_task_ctx {
 	enum cct_match	match;
 	u64			priority;
+	int		should_yield;
 };
 
 

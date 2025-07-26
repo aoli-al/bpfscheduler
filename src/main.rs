@@ -9,18 +9,22 @@ use std::time::Duration;
 
 mod stats;
 use anyhow::Context;
-pub use bpf_skel::*;
 use anyhow::Result;
+pub use bpf_skel::*;
 use clap::Parser;
+use libbpf_rs::OpenObject;
+use libbpf_rs::UprobeOpts;
 use log::info;
 use nix::unistd::Pid;
 use scx_stats::StatsServer;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
-use libbpf_rs::OpenObject;
 use stats::Metrics;
-
+mod mutex_bpf_skel {
+    include!(concat!(env!("OUT_DIR"), "/mutex_monitor.skel.rs"));
+}
+use mutex_bpf_skel::*;
 
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -56,19 +60,34 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, cct_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, cct_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
+        let uprobe_opts = UprobeOpts {
+            ref_ctr_offset: 0,
+            cookie: 0,
+            retprobe: false,
+            func_name: "pthread_mutex_lock".to_string(),
+            ..Default::default()
+        };
 
-        Ok(Self { 
-            skel, 
-            opts, 
+        let _lock_link = skel
+            .progs
+            .mutex_lock_entry
+            .attach_uprobe_with_opts(
+                -1,
+                "/nix/store/g2jzxk3s7cnkhh8yq55l4fbvf639zy37-glibc-2.40-66/lib/libc.so.6",
+                0,
+                uprobe_opts,
+            )
+            .context("Failed to attach uprobe to pthread_mutex_lock")?;
+
+        Ok(Self {
+            skel,
+            opts,
             struct_ops,
-            stats_server
+            stats_server,
         })
     }
 
-    pub fn observe(
-        &self,
-        shutdown: &(Mutex<bool>, Condvar),
-    ) -> Result<()> {
+    pub fn observe(&self, shutdown: &(Mutex<bool>, Condvar)) -> Result<()> {
         let (lock, cvar) = shutdown;
         let mut guard = lock.lock().unwrap();
         while !*guard {
@@ -81,10 +100,10 @@ impl<'a> Scheduler<'a> {
     }
 }
 
-
 fn main() -> Result<()> {
     let opts = Arc::new(Opts::parse());
     let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
+    let scheduler_ready = Arc::new((Mutex::new(false), Condvar::new()));
 
     ctrlc::set_handler({
         let shutdown = shutdown.clone();
@@ -99,9 +118,15 @@ fn main() -> Result<()> {
     let scheduler_thread = thread::spawn({
         let opts = opts.clone();
         let shutdown = shutdown.clone();
+        let scheduler_ready = scheduler_ready.clone();
         move || -> Result<()> {
             let mut open_object = MaybeUninit::uninit();
-            let sched= Scheduler::init(&opts, &mut open_object)?;
+            let sched = Scheduler::init(&opts, &mut open_object)?;
+            // scheduler_ready.0.lock().unwrap() = true;
+            let (lock, cvar) = &*scheduler_ready;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+
             sched.observe(&shutdown)?;
             Ok(())
         }
@@ -110,9 +135,15 @@ fn main() -> Result<()> {
     let (cmd, vargs) = opts.args.split_first().unwrap();
 
     let mut should_run_app = true;
-        while should_run_app {
-
+    let mut iter = 0;
+    let sched_ready = scheduler_ready.clone();
+    let (lock, cvar) = &*sched_ready;
+    while !*lock.lock().unwrap() {
+        let _unused = cvar.wait(lock.lock().unwrap()).unwrap();
+    }
+    while should_run_app {
         let mut child = Command::new(cmd).args(vargs).spawn()?;
+        iter += 1;
         loop {
             should_run_app &= !*shutdown.0.lock().unwrap();
             if scheduler_thread.is_finished() {
@@ -122,6 +153,8 @@ fn main() -> Result<()> {
             if let Some(s) = child.try_wait()? {
                 if s.success() {
                     should_run_app &= !*shutdown.0.lock().unwrap();
+                    // should_run_app &= iter < 2; // Limit to 10 iterations
+                    should_run_app &= false;
                     if should_run_app {
                         info!("app under test terminated successfully, restarting...");
                     };

@@ -17,7 +17,7 @@
         packages.default = pkgs.rustPlatform.buildRustPackage {
           name = "bpfscheduler";
           version = "0.1.0";
-          cargoHash = "sha256-Dapq2pu1ojD78E8MlATXzVuwhpTLHNpW4u78L/rnP34=";
+          cargoHash = "sha256-utEBWyHlvlSztjyQjZ9ga842lJsUOQIFB3P0EPV7sao=";
           hardeningDisable = [ "all" ];
           buildInputs = with pkgs; [
             zlib
@@ -25,9 +25,7 @@
             elfutils.out
             libbpf
             bear
-            (rust-bin.stable.latest.default.override {
-              extensions = ["rust-src" "rust-analyzer"];
-            })
+            rustfmt
           ];
 
           nativeBuildInputs = with pkgs; [

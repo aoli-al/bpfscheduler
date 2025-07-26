@@ -13,10 +13,6 @@ ci.use_clippy = true
 name = "scx_chaos"
 path = "src/main.rs"
 
-[[bin]]
-name = "mutex_monitor"
-path = "src/mutex_monitor.rs"
-
 [dependencies]
 scx_userspace_arena = "1.0.14"
 scx_utils = "1.0.17"

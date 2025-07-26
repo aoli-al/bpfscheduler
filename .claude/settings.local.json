@@ -3,7 +3,11 @@
     "allow": [
       "Bash(cargo:*)",
       "Bash(find:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(RUST_BACKTRACE=1 cargo build)",
+      "Bash(ls:*)",
+      "Bash(nix develop:*)",
+      "Bash(echo $SHELL)"
     ],
     "deny": []
   }

@@ -187,30 +187,6 @@ out:
   return ret;
 }
 
-s32 BPF_STRUCT_OPS(cct_select_cpu, struct task_struct *p, s32 prev_cpu,
-                   u64 wake_flags) {
-  bool is_idle = false;
-  s32 cpu;
-  struct cct_task_ctx *taskc;
-
-  taskc = lookup_create_cct_task_ctx(p);
-  if (!(taskc = lookup_create_cct_task_ctx(p)))
-    goto out;
-
-  if (taskc->match & CCT_MATCH_HAS_PARENT) {
-    bpf_printk("select_cpu: task(%s) %d is controlled by CCT", p->comm, p->pid);
-    return prev_cpu;
-  }
-
-out:
-  cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-  if (is_idle) {
-    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
-  }
-
-  return cpu;
-}
-
 void BPF_STRUCT_OPS(cct_task_running, struct task_struct *p) {
   if (!p)
     return;
@@ -222,6 +198,13 @@ void BPF_STRUCT_OPS(cct_task_running, struct task_struct *p) {
   if (taskc->match & CCT_MATCH_HAS_PARENT) {
     cct_task_is_running = true;
     bpf_printk("task(%s) %d is running in CCT\n", p->comm, p->pid);
+    
+    // Check if task should yield due to mutex lock
+    // if (taskc->should_yield) {
+    //   bpf_printk("task(%s) %d yielding due to mutex lock\n", p->comm, p->pid);
+    //   p->scx.slice = 0;
+    //   taskc->should_yield = 0; // Reset the flag
+    // }
   }
 }
 
@@ -267,6 +250,21 @@ void BPF_STRUCT_OPS(cct_enqueue, struct task_struct *p, u64 enq_flags) {
     scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, 10, 100, enq_flags);
   }
 }
+
+
+void BPF_STRUCT_OPS(cct_task_tick, struct task_struct *p) {
+  if (p) {
+    struct cct_task_ctx *prev_taskc = lookup_create_cct_task_ctx(p);
+    if (prev_taskc && (prev_taskc->match & CCT_MATCH_HAS_PARENT) &&
+        prev_taskc->should_yield) {
+      prev_taskc->should_yield = 0; // Reset the flag
+      p->scx.slice = 0; // Reset the slice
+      scx_bpf_kick_cpu(8, SCX_KICK_PREEMPT);
+    //   bpf_printk("Task %s (%d) kicked to CCT_DSQ\n", p->comm, p->pid);
+    }
+  }
+}
+
 
 void BPF_STRUCT_OPS(cct_dispatch, s32 cpu, struct task_struct *prev) {
 
@@ -334,7 +332,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cct_init_task, struct task_struct *p,
   return 0;
 }
 
-SCX_OPS_DEFINE(cct_ops, .select_cpu = (void *)cct_select_cpu,
+SEC("uprobe//nix/store/g2jzxk3s7cnkhh8yq55l4fbvf639zy37-glibc-2.40-66/lib/libc.so.6:pthread_mutex_lock")
+int mutex_lock_entry(struct pt_regs *ctx)
+{
+    struct task_struct *p = (struct task_struct *)bpf_get_current_task_btf();
+    struct cct_task_ctx *taskc;
+    if (!(taskc = lookup_create_cct_task_ctx(p))) {
+      bpf_printk("couldn't find task context for task %d\n", p->pid);
+      return 0;
+    }
+    if (taskc->match & CCT_MATCH_HAS_PARENT) {
+        bpf_printk("task(%s) %d is controlled by CCT, requesting yield\n",
+                   p->comm, p->pid);
+        taskc->should_yield = 1;
+        return 0;
+    }
+    return 0;
+}
+
+SCX_OPS_DEFINE(cct_ops, .tick = (void *)cct_task_tick,
                .enqueue = (void *)cct_enqueue,
                .running = (void *)cct_task_running,
                .stopping = (void *)cct_task_stopping,
