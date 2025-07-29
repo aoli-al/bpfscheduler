@@ -21,10 +21,10 @@ use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use stats::Metrics;
-mod mutex_bpf_skel {
-    include!(concat!(env!("OUT_DIR"), "/mutex_monitor.skel.rs"));
-}
-use mutex_bpf_skel::*;
+// mod mutex_bpf_skel {
+//     include!(concat!(env!("OUT_DIR"), "/mutex_monitor.skel.rs"));
+// }
+// use mutex_bpf_skel::*;
 
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -55,7 +55,7 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(true);
         let mut skel = scx_ops_open!(skel_builder, open_object, cct_ops)?;
         skel.struct_ops.cct_ops_mut().exit_dump_len = 0;
-        skel.maps.rodata_data.ppid_targeting_ppid = Pid::this().as_raw();
+        skel.maps.rodata_data.as_mut().unwrap().ppid_targeting_ppid = Pid::this().as_raw();
 
         let mut skel = scx_ops_load!(skel, cct_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, cct_ops)?);
@@ -64,7 +64,7 @@ impl<'a> Scheduler<'a> {
             ref_ctr_offset: 0,
             cookie: 0,
             retprobe: false,
-            func_name: "pthread_mutex_lock".to_string(),
+            func_name: Some("pthread_mutex_lock".to_string()),
             ..Default::default()
         };
 
@@ -135,7 +135,6 @@ fn main() -> Result<()> {
     let (cmd, vargs) = opts.args.split_first().unwrap();
 
     let mut should_run_app = true;
-    let mut iter = 0;
     let sched_ready = scheduler_ready.clone();
     let (lock, cvar) = &*sched_ready;
     while !*lock.lock().unwrap() {
@@ -143,7 +142,6 @@ fn main() -> Result<()> {
     }
     while should_run_app {
         let mut child = Command::new(cmd).args(vargs).spawn()?;
-        iter += 1;
         loop {
             should_run_app &= !*shutdown.0.lock().unwrap();
             if scheduler_thread.is_finished() {
@@ -154,7 +152,7 @@ fn main() -> Result<()> {
                 if s.success() {
                     should_run_app &= !*shutdown.0.lock().unwrap();
                     // should_run_app &= iter < 2; // Limit to 10 iterations
-                    should_run_app &= false;
+                    // should_run_app &= false;
                     if should_run_app {
                         info!("app under test terminated successfully, restarting...");
                     };

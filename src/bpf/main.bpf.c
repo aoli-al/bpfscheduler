@@ -21,34 +21,74 @@
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
 
+#define P2DQ_CREATE_STRUCT_OPS 0
+#include "scx_p2dq/main.bpf.c"
 #include "intf.h"
 #include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
-#include <scx/common.bpf.h>
-
-char _license[] SEC("license") = "GPL";
 
 const volatile int ppid_targeting_ppid = 1;
 
-static bool cct_task_is_running = 0;
 UEI_DEFINE(uei);
 
-/*
- * Built-in DSQs such as SCX_DSQ_GLOBAL cannot be used as priority queues
- * (meaning, cannot be dispatched to with scx_bpf_dispatch_vtime()). We
- * therefore create a separate DSQ with ID 0 that we dispatch to and consume
- * from. If scx_simple only supported global FIFO scheduling, then we could
- * just use SCX_DSQ_GLOBAL.
- */
 #define SHARED_DSQ 0
-#define CCT_DSQ 1
 
-struct {
-  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-  __uint(key_size, sizeof(u32));
-  __uint(value_size, sizeof(u64));
-  __uint(max_entries, 2); /* [local, global] */
-} stats SEC(".maps");
+#define __COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, slice)             \
+  (bpf_ksym_exists(scx_bpf_dsq_move_set_slice)                                 \
+       ? scx_bpf_dsq_move_set_slice((it__iter), (slice))                       \
+       : scx_bpf_dispatch_from_dsq_set_slice___compat((it__iter), (slice)))
+
+#define __COMPAT_chaos_scx_bpf_dsq_move(it__iter, p, dsq_id, enq_flags)        \
+  (bpf_ksym_exists(scx_bpf_dsq_move)                                           \
+       ? scx_bpf_dsq_move((it__iter), (p), (dsq_id), (enq_flags))              \
+       : scx_bpf_dispatch_from_dsq___compat((it__iter), (p), (dsq_id),         \
+                                            (enq_flags)))
+
+#define __COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, vtime)             \
+  (bpf_ksym_exists(scx_bpf_dsq_move_set_vtime)                                 \
+       ? scx_bpf_dsq_move_set_vtime((it__iter), (vtime))                       \
+       : scx_bpf_dispatch_from_dsq_set_vtime___compat((it__iter), (vtime)))
+
+#define __COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, dsq_id, enq_flags)  \
+  (bpf_ksym_exists(scx_bpf_dsq_move_vtime)                                     \
+       ? scx_bpf_dsq_move_vtime((it__iter), (p), (dsq_id), (enq_flags))        \
+       : scx_bpf_dispatch_vtime_from_dsq___compat((it__iter), (p), (dsq_id),   \
+                                                  (enq_flags)))
+
+static __always_inline void
+complete_p2dq_enqueue_move(struct enqueue_promise *pro,
+                           struct bpf_iter_scx_dsq *it__iter,
+                           struct task_struct *p) {
+  switch (pro->kind) {
+  case P2DQ_ENQUEUE_PROMISE_COMPLETE:
+    scx_bpf_error("chaos: delayed async_p2dq_enqueue returned COMPLETE"
+                  " after a task was placed in the delay dsq!");
+    break;
+  case P2DQ_ENQUEUE_PROMISE_FIFO:
+    __COMPAT_chaos_scx_bpf_dsq_move_set_slice(
+        it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
+    __COMPAT_chaos_scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id,
+                                    pro->fifo.enq_flags);
+    break;
+  case P2DQ_ENQUEUE_PROMISE_VTIME:
+    __COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
+    __COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
+    __COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id,
+                                          pro->vtime.enq_flags);
+    break;
+  case P2DQ_ENQUEUE_PROMISE_ATQ_FIFO:
+  case P2DQ_ENQUEUE_PROMISE_ATQ_VTIME:
+    scx_bpf_error("chaos: ATQs not supported");
+    break;
+  case P2DQ_ENQUEUE_PROMISE_FAILED:
+    scx_bpf_error("chaos: delayed async_p2dq_enqueue failed");
+    break;
+  }
+
+  if (pro->kick_idle)
+    scx_bpf_kick_cpu(pro->cpu, SCX_KICK_IDLE);
+
+  pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+}
 
 struct {
   __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -60,6 +100,22 @@ struct {
 struct cct_task_ctx *lookup_create_cct_task_ctx(struct task_struct *p) {
   return bpf_task_storage_get(&controlled_task_ctxs, p, NULL,
                               BPF_LOCAL_STORAGE_GET_F_CREATE);
+}
+
+static __always_inline void
+destroy_p2dq_enqueue_promise(struct enqueue_promise *pro) {
+  // If the idle bit of a CPU has already been cleared but we don't plan
+  // to execute a task on it we should kick the CPU. If the CPU goes to
+  // sleep again it will reset the kernel managed idle state.
+  if (pro->has_cleared_idle)
+    scx_bpf_kick_cpu(pro->cpu, SCX_KICK_IDLE);
+}
+
+__weak int async_p2dq_enqueue_weak(struct enqueue_promise *ret __arg_nonnull,
+                                   struct task_struct *p __arg_trusted,
+                                   u64 enq_flags) {
+  async_p2dq_enqueue(ret, p, enq_flags);
+  return 0;
 }
 
 static __always_inline s32 calculate_cct_match(struct task_struct *p) {
@@ -175,154 +231,93 @@ static __always_inline s32 calculate_cct_match(struct task_struct *p) {
     bpf_task_release(p2);
   }
 
-  // if (flags & CCT_MATCH_HAS_PARENT) {
-  // 	bpf_printk("task(%s) %d matched CCT with flags %x\n",
-  // 		   p->comm, p->pid, flags);
-  // } else {
-  // 	// bpf_printk("task(%s) %d did not match CCT with flags %x\n",
-  // 	// 	   p->comm, p->pid, flags);
-  // }
-
 out:
   return ret;
 }
 
-void BPF_STRUCT_OPS(cct_task_running, struct task_struct *p) {
-  if (!p)
-    return;
-  struct cct_task_ctx *taskc;
-  if (!(taskc = lookup_create_cct_task_ctx(p))) {
-    scx_bpf_error("couldn't create task context");
-    return;
-  }
-  if (taskc->match & CCT_MATCH_HAS_PARENT) {
-    cct_task_is_running = true;
-    bpf_printk("task(%s) %d is running in CCT\n", p->comm, p->pid);
-    
-    // Check if task should yield due to mutex lock
-    // if (taskc->should_yield) {
-    //   bpf_printk("task(%s) %d yielding due to mutex lock\n", p->comm, p->pid);
-    //   p->scx.slice = 0;
-    //   taskc->should_yield = 0; // Reset the flag
-    // }
-  }
-}
+static __always_inline u64 get_cpu_delay_dsq(int cpu_idx) {
+  if (cpu_idx >= 0)
+    return CCT_DSQ_BASE | cpu_idx;
 
-void BPF_STRUCT_OPS(cct_task_stopping, struct task_struct *p) {
-  if (!p)
-    return;
-  struct cct_task_ctx *taskc;
-  if (!(taskc = lookup_create_cct_task_ctx(p))) {
-    scx_bpf_error("couldn't create task context");
-    return;
-  }
-  if (taskc->match & CCT_MATCH_HAS_PARENT) {
-    cct_task_is_running = false;
-    bpf_printk("task(%s) %d is stopping in CCT\n", p->comm, p->pid);
-  }
-}
-
-void BPF_STRUCT_OPS(cct_task_quiescent, struct task_struct *p) {
-  if (!p)
-    return;
-  struct cct_task_ctx *taskc;
-  if (!(taskc = lookup_create_cct_task_ctx(p))) {
-    scx_bpf_error("couldn't create task context");
-    return;
-  }
-  if (taskc->match & CCT_MATCH_HAS_PARENT) {
-    bpf_printk("task(%s) %d is quiescing in CCT\n", p->comm, p->pid);
-    // scx_bpf_dsq_insert(p, CCT_DSQ, 10, SCX_ENQ_PREEMPT);
-  }
+  cpu_idx = bpf_get_smp_processor_id();
+  return CCT_DSQ_BASE | cpu_idx;
 }
 
 void BPF_STRUCT_OPS(cct_enqueue, struct task_struct *p, u64 enq_flags) {
+  struct enqueue_promise promise;
   struct cct_task_ctx *taskc;
+
   if (!(taskc = lookup_create_cct_task_ctx(p))) {
-    scx_bpf_error("couldn't create task context");
+    scx_bpf_error("failed to lookup task context in enqueue");
     return;
   }
 
-  if (taskc->match & CCT_MATCH_HAS_PARENT) {
-    bpf_printk("task(%s) %d is being enqueued in CCT\n", p->comm, p->pid);
-    scx_bpf_dsq_insert(p, CCT_DSQ, SCX_SLICE_DFL, enq_flags);
-  } else {
-    scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, 10, 100, enq_flags);
-  }
+  // capture vtime before the potentially discarded enqueue
+  taskc->p2dq_vtime = p->scx.dsq_vtime;
+
+  async_p2dq_enqueue(&promise, p, enq_flags);
+  if (promise.kind == P2DQ_ENQUEUE_PROMISE_COMPLETE)
+    return;
+  if (promise.kind == P2DQ_ENQUEUE_PROMISE_FAILED)
+    goto cleanup;
+
+  complete_p2dq_enqueue(&promise, p);
+  return;
+cleanup:
+  destroy_p2dq_enqueue_promise(&promise);
 }
 
-
-void BPF_STRUCT_OPS(cct_task_tick, struct task_struct *p) {
-  if (p) {
-    struct cct_task_ctx *prev_taskc = lookup_create_cct_task_ctx(p);
-    if (prev_taskc && (prev_taskc->match & CCT_MATCH_HAS_PARENT) &&
-        prev_taskc->should_yield) {
-      prev_taskc->should_yield = 0; // Reset the flag
-      p->scx.slice = 0; // Reset the slice
-      scx_bpf_kick_cpu(8, SCX_KICK_PREEMPT);
-    //   bpf_printk("Task %s (%d) kicked to CCT_DSQ\n", p->comm, p->pid);
-    }
-  }
-}
-
+void BPF_STRUCT_OPS(cct_task_tick, struct task_struct *p) {}
 
 void BPF_STRUCT_OPS(cct_dispatch, s32 cpu, struct task_struct *prev) {
+  struct enqueue_promise promise;
+  struct cct_task_ctx *taskc;
+  struct task_struct *p;
+  u64 now = bpf_ktime_get_ns();
 
-  if (cpu == 8) {
-    if (cct_task_is_running) {
-      bpf_printk("CCT is already running, skipping dispatch\n");
-      goto out;
+  bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(-1), 0) {
+    p = bpf_task_from_pid(p->pid);
+    if (!p)
+      continue;
+
+    if (!(taskc = lookup_create_cct_task_ctx(p))) {
+      scx_bpf_error("couldn't find task context");
+      bpf_task_release(p);
+      break;
     }
 
-    u32 cct_dsq_length = scx_bpf_dsq_nr_queued(CCT_DSQ);
-
-    if (cct_dsq_length > 1) {
-      bpf_printk("CCT_DSQ length: %u\n", cct_dsq_length);
+    if (p->scx.dsq_vtime > now) {
+      bpf_task_release(p);
+      break; // this is the DSQ's key so we're done
     }
 
-    struct cct_task_ctx *taskc;
-    struct task_struct *p;
-    u64 initial_dsq = CCT_DSQ;
-    u32 highest_priority = 0;
-    s32 highest_task_pid = 0;
-    bpf_for_each(scx_dsq, p, initial_dsq, 0) {
-      if (!(taskc = lookup_create_cct_task_ctx(p))) {
-        scx_bpf_error("couldn't find task context");
-        break;
-      }
-      u32 priority = bpf_get_prandom_u32();
-      if (priority > highest_priority) {
-        highest_priority = priority;
-        highest_task_pid = p->pid;
-      }
-    }
-    bpf_for_each(scx_dsq, p, initial_dsq, 0) {
-      struct bpf_iter_scx_dsq *iter = BPF_FOR_EACH_ITER;
-      if (p->pid == highest_task_pid) {
-        scx_bpf_dsq_move(iter, p, SCX_DSQ_LOCAL_ON | cpu, SCX_ENQ_PREEMPT);
-        bpf_printk("Task %s (%d) moved to CCT_DSQ\n", p->comm, p->pid);
-      }
-    }
+    // restore vtime to p2dq's timeline
+    p->scx.dsq_vtime = taskc->p2dq_vtime;
+
+    async_p2dq_enqueue_weak(&promise, p, SCX_ENQ_PREEMPT);
+    complete_p2dq_enqueue_move(&promise, BPF_FOR_EACH_ITER, p);
+    bpf_task_release(p);
   }
-out:
-  scx_bpf_dsq_move_to_local(SHARED_DSQ);
+
+  return p2dq_dispatch_impl(cpu, prev);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cct_init) {
-  int ret;
-  ret = scx_bpf_create_dsq(CCT_DSQ, -1);
-  if (ret < 0) {
-    scx_bpf_error("failed to create CCT DSQ");
-    return ret;
-  }
-  ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
-  if (ret < 0) {
-    scx_bpf_error("failed to create shared DSQ");
-  }
-  return ret;
-}
+  struct timer_wrapper *timerw;
+  struct llc_ctx *llcx;
+  struct cpu_ctx *cpuc;
+  int timer_id, ret, i;
 
-void BPF_STRUCT_OPS(cct_exit, struct scx_exit_info *ei) { UEI_RECORD(uei, ei); }
+  bpf_for(i, 0, topo_config.nr_cpus) {
+    if (!(cpuc = lookup_cpu_ctx(i)) || !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+      return -EINVAL;
+
+    ret = scx_bpf_create_dsq(CCT_DSQ_BASE | i, llcx->node_id);
+    if (ret < 0)
+      return ret;
+  }
+  return p2dq_init_impl();
+}
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cct_init_task, struct task_struct *p,
                              struct scx_init_task_args *args) {
@@ -332,30 +327,36 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cct_init_task, struct task_struct *p,
   return 0;
 }
 
-SEC("uprobe//nix/store/g2jzxk3s7cnkhh8yq55l4fbvf639zy37-glibc-2.40-66/lib/libc.so.6:pthread_mutex_lock")
-int mutex_lock_entry(struct pt_regs *ctx)
-{
-    struct task_struct *p = (struct task_struct *)bpf_get_current_task_btf();
-    struct cct_task_ctx *taskc;
-    if (!(taskc = lookup_create_cct_task_ctx(p))) {
-      bpf_printk("couldn't find task context for task %d\n", p->pid);
-      return 0;
-    }
-    if (taskc->match & CCT_MATCH_HAS_PARENT) {
-        bpf_printk("task(%s) %d is controlled by CCT, requesting yield\n",
-                   p->comm, p->pid);
-        taskc->should_yield = 1;
-        return 0;
-    }
+void BPF_STRUCT_OPS(cct_running, struct task_struct *p) {
+  p2dq_running_impl(p);
+}
+
+SEC("uprobe//nix/store/g2jzxk3s7cnkhh8yq55l4fbvf639zy37-glibc-2.40-66/lib/"
+    "libc.so.6:pthread_mutex_lock")
+int mutex_lock_entry(struct pt_regs *ctx) {
+  struct task_struct *p = (struct task_struct *)bpf_get_current_task_btf();
+  struct cct_task_ctx *taskc;
+  if (!(taskc = lookup_create_cct_task_ctx(p))) {
+    bpf_printk("couldn't find task context for task %d\n", p->pid);
     return 0;
+  }
+  if (taskc->match & CCT_MATCH_HAS_PARENT) {
+    bpf_printk("task(%s) %d is controlled by CCT, requesting yield\n", p->comm,
+               p->pid);
+    taskc->should_yield = 1;
+    return 0;
+  }
+
+  return 0;
 }
 
 SCX_OPS_DEFINE(cct_ops, .tick = (void *)cct_task_tick,
-               .enqueue = (void *)cct_enqueue,
-               .running = (void *)cct_task_running,
-               .stopping = (void *)cct_task_stopping,
-               .quiescent = (void *)cct_task_quiescent,
+               .enqueue = (void *)cct_enqueue, .running = (void *)cct_running,
+               .stopping = (void *)p2dq_stopping,
                .dispatch = (void *)cct_dispatch, .init = (void *)cct_init,
-               .init_task = (void *)cct_init_task, .exit = (void *)cct_exit,
+               .init_task = (void *)cct_init_task, .exit = (void *)p2dq_exit,
+               .exit_task = (void *)p2dq_exit_task,
+               .set_cpumask = (void *)p2dq_set_cpumask,
+               .update_idle = (void *)p2dq_update_idle,
                .flags = SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
                .name = "cct");

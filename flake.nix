@@ -3,9 +3,13 @@
     nixpkgs.url = "nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
+    scx-src = {
+      url = "github:sched-ext/scx/89a7736c71370335660980aa31a62482f1cd32d1";
+      flake = false;
+    };
   };
 
-  outputs = { self, rust-overlay, flake-utils, nixpkgs }:
+  outputs = { self, rust-overlay, flake-utils, nixpkgs, scx-src }:
     flake-utils.lib.eachDefaultSystem (system: 
       let
         overlays = [ (import rust-overlay) ];
@@ -37,6 +41,10 @@
             # llvmPackages_20.clang.lib
             linuxHeaders
           ];
+
+          preConfigure = ''
+            export SCX_SRC="${scx-src}";
+            '';
           src = ./.;
         };
 
@@ -46,6 +54,7 @@
             unset NIX_HARDENING_ENABLE
             export LD_LIBRARY_PATH=${pkgs.elfutils.out}/lib
             export RUST_SRC_PATH="${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+            export SCX_SRC="${scx-src}";
           '';
         };
       });

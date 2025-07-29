@@ -7,7 +7,10 @@ typedef unsigned long long u64;
 
 enum cct_consts {
 	CCT_NUM_PPIDS_CHECK	= 1 << 20,
+	CCT_DSQ_BASE_SHIFT	= 16,
+	CCT_DSQ_BASE		= 1 << CCT_DSQ_BASE_SHIFT,
 };
+
 
 enum cct_match {
 	CCT_MATCH_UNKNOWN			= 0,
@@ -22,6 +25,7 @@ struct cct_task_ctx {
 	enum cct_match	match;
 	u64			priority;
 	int		should_yield;
+	u64			p2dq_vtime;
 };
 
 

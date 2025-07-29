@@ -53,7 +53,8 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "scx-src": "scx-src"
       }
     },
     "rust-overlay": {
@@ -71,6 +72,23 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "scx-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1753979145,
+        "narHash": "sha256-JOyOWjMDN0KNc+9hPWV1WbG82orWZBqOxWqvsSfhdv8=",
+        "owner": "sched-ext",
+        "repo": "scx",
+        "rev": "89a7736c71370335660980aa31a62482f1cd32d1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "sched-ext",
+        "repo": "scx",
+        "rev": "89a7736c71370335660980aa31a62482f1cd32d1",
         "type": "github"
       }
     },
