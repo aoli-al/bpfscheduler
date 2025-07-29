@@ -18,6 +18,8 @@
 #include <cstdlib>
 #include <pthread.h>
 #include <cassert>
+#include <unistd.h>
+#include <sys/syscall.h>
 
 // typedefs
 typedef struct {
@@ -27,9 +29,7 @@ typedef struct {
 
 int get_balance(bank_account_type *account) {
   int ret = 0;
-  pthread_mutex_lock(&account->lock);
   ret = account->balance;
-  pthread_mutex_unlock(&account->lock);
   return ret;
 }
 
@@ -61,6 +61,7 @@ void init_account(bank_account_type *account) {
 static int amount = 20;
 
 void *t1_main(void *args) {
+  printf("T1: Thread ID: %ld\n", syscall(SYS_gettid));
   bank_account_type *account = (bank_account_type *)args;
   printf("t1 is depositing %d\n", amount);
   deposit(account, amount);
@@ -69,6 +70,7 @@ void *t1_main(void *args) {
 }
 
 void *t2_main(void *args) {
+  printf("T2: Thread ID: %ld\n", syscall(SYS_gettid));
   bank_account_type *account = (bank_account_type *)args;
   printf("t2 is withdrawing %d\n", amount);
   withdraw(account, 20);
