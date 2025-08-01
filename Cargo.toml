@@ -10,7 +10,7 @@ license = "GPL-2.0-only"
 ci.use_clippy = true
 
 [[bin]]
-name = "scx_chaos"
+name = "cct_scheduler"
 path = "src/main.rs"
 
 [dependencies]
@@ -30,6 +30,7 @@ scx_p2dq = { git = "https://github.com/sched-ext/scx", rev = "89a7736c7137033566
 scx_utils = { git = "https://github.com/sched-ext/scx", rev = "89a7736c71370335660980aa31a62482f1cd32d1" }
 scx_stats = { git = "https://github.com/sched-ext/scx", rev = "89a7736c71370335660980aa31a62482f1cd32d1" }
 scx_stats_derive = { git = "https://github.com/sched-ext/scx", rev = "89a7736c71370335660980aa31a62482f1cd32d1" }
+scx_userspace_arena = { git = "https://github.com/sched-ext/scx", rev = "89a7736c71370335660980aa31a62482f1cd32d1" }
 
 [build-dependencies]
 scx_p2dq = { git = "https://github.com/sched-ext/scx", rev = "89a7736c71370335660980aa31a62482f1cd32d1" }
