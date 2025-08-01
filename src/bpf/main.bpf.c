@@ -526,7 +526,7 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 
 	if (taskc->next_trait) {
 		bpf_printk("CHAOS: task[%d, %s] pending trait %d",
-			   p->pid, p->comm, taskc->pending_trait);
+			   p->pid, p->comm, taskc->next_trait);
 	}
 
 	if ((taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS ||

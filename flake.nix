@@ -30,14 +30,14 @@
             libbpf
             bear
             rustfmt
+            llvmPackages_20.clang-tools  
+            llvmPackages_20.libcxx
+            llvmPackages_20.clang
           ];
 
           nativeBuildInputs = with pkgs; [
             rustPlatform.bindgenHook
             pkg-config
-            llvmPackages_20.clang-tools  
-            llvmPackages_20.clang
-            llvmPackages_20.libcxx
             # llvmPackages_20.clang.lib
             linuxHeaders
           ];
