@@ -141,7 +141,6 @@ pub enum RequiresPpid {
 #[derive(Debug)]
 pub struct KprobeRandomDelays {
     pub kprobes: Vec<String>,
-    pub freq: f64,
     pub min_us: u64,
     pub max_us: u64,
 }
@@ -472,8 +471,6 @@ impl Builder<'_> {
         };
 
         if let Some(kprobe_random_delays) = &self.kprobe_random_delays {
-            rodata.kprobe_delays_freq_frac32 =
-                (kprobe_random_delays.freq * 2_f64.powf(32_f64)) as u32;
             rodata.kprobe_delays_min_ns = kprobe_random_delays.min_us * 1000;
             rodata.kprobe_delays_max_ns = kprobe_random_delays.max_us * 1000;
         }
@@ -645,9 +642,6 @@ pub struct KprobeArgs {
     #[clap(long, num_args = 1.., value_parser, requires = "kprobe_random_delay_min_us")]
     pub kprobes_for_random_delays: Vec<String>,
 
-    /// Chance of kprobe random delays. Must be between 0 and 1. [default=0.1]
-    #[clap(long, requires = "kprobes_for_random_delays")]
-    pub kprobe_random_delay_frequency: Option<f64>,
 
     /// Minimum time to add for kprobe random delay.
     #[clap(long, requires = "kprobe_random_delay_max_us")]
@@ -804,12 +798,10 @@ impl<'a> Iterator for BuilderIterator<'a> {
             let kprobe_random_delays = match &self.args.kprobe_random_delays {
                 KprobeArgs {
                     kprobes_for_random_delays,
-                    kprobe_random_delay_frequency,
                     kprobe_random_delay_min_us: Some(min_us),
                     kprobe_random_delay_max_us: Some(max_us),
                 } if !kprobes_for_random_delays.is_empty() => Some(KprobeRandomDelays {
                     kprobes: kprobes_for_random_delays.clone(),
-                    freq: kprobe_random_delay_frequency.unwrap_or(0.1),
                     min_us: *min_us,
                     max_us: *max_us,
                 }),
