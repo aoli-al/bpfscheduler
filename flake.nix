@@ -21,7 +21,7 @@
         packages.default = pkgs.rustPlatform.buildRustPackage {
           name = "bpfscheduler";
           version = "0.1.0";
-          cargoHash = "sha256-utEBWyHlvlSztjyQjZ9ga842lJsUOQIFB3P0EPV7sao=";
+          cargoHash = "sha256-jvIWHYRbgXjGLz7elO3R/X+wwIRaNk4IGdY4fn4/40c=";
           hardeningDisable = [ "all" ];
           buildInputs = with pkgs; [
             zlib
