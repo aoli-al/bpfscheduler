@@ -2,3 +2,4 @@ target
 .devenv
 .direnv
 .cache
+.claude
