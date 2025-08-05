@@ -55,4 +55,9 @@ enum chaos_stat_idx {
 	CHAOS_NR_STATS,
 };
 
+enum chaos_power_law_consts {
+	CHAOS_POWER_LAW_SIZE = 50000,
+	CHAOS_POWER_LAW_SCALE = 1000000, /* Scale factor for fixed-point arithmetic */
+};
+
 #endif /* __CHAOS_INTF_H */

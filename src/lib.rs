@@ -369,6 +369,59 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// Generate power law distribution CDF and populate the BPF map
+    /// Translates the C++ std::discrete_distribution functionality to eBPF
+    fn setup_power_law_distribution(&self, skel: &mut BpfSkel) -> Result<()> {
+        const POWER_LAW_SIZE: usize = 50000;
+        const POWER_LAW_SCALE: u64 = 1000000;
+        
+        // Default parameters - can be made configurable later
+        let bias = 1.0;
+        let power = 2.0;
+        
+        // Generate probabilities: 1.0 / (i + bias)^power
+        let mut probabilities = Vec::with_capacity(POWER_LAW_SIZE);
+        for i in 0..POWER_LAW_SIZE {
+            let prob = 1.0 / (i as f64 + bias).powf(power);
+            probabilities.push(prob);
+        }
+        
+        // Normalize probabilities
+        let total: f64 = probabilities.iter().sum();
+        for prob in &mut probabilities {
+            *prob /= total;
+        }
+        
+        // Convert to cumulative distribution function (CDF)
+        let mut cumulative_sum = 0.0;
+        let mut cdf_values = Vec::with_capacity(POWER_LAW_SIZE);
+        
+        for prob in probabilities {
+            cumulative_sum += prob;
+            // Scale to fixed-point integer for eBPF
+            let scaled_value = (cumulative_sum * POWER_LAW_SCALE as f64) as u64;
+            cdf_values.push(scaled_value);
+        }
+        
+        // Ensure the last value is exactly POWER_LAW_SCALE (for perfect probability)
+        if let Some(last) = cdf_values.last_mut() {
+            *last = POWER_LAW_SCALE;
+        }
+        
+        // Populate the BPF map
+        let map = &skel.maps.chaos_power_law_cdf;
+        for (i, &cdf_value) in cdf_values.iter().enumerate() {
+            let key = i as u32;
+            let value = cdf_value;
+            
+            map.update(&key.to_ne_bytes(), &value.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .with_context(|| format!("Failed to update power law CDF map at index {}", i))?;
+        }
+        
+        info!("Initialized power law distribution with {} entries", POWER_LAW_SIZE);
+        Ok(())
+    }
+
     fn attach_uprobes(&self, skel: &mut BpfSkel) -> Result<Vec<Link>> {
         let uprobe_opts = UprobeOpts {
             ref_ctr_offset: 0,
@@ -385,7 +438,7 @@ impl Builder<'_> {
             .libc_pthread_mutex_lock
             .attach_uprobe_with_opts(
                 -1,
-                "/nix/store/g2jzxk3s7cnkhh8yq55l4fbvf639zy37-glibc-2.40-66/lib/libc.so.6",
+                "/nix/store/lmn7lwydprqibdkghw7wgcn21yhllz13-glibc-2.40-66/lib/libc.so.6",
                 0,
                 uprobe_opts,
             )
@@ -548,6 +601,7 @@ impl Builder<'_> {
 
         self.setup_arenas(&mut skel)?;
         self.setup_topology(&mut skel)?;
+        self.setup_power_law_distribution(&mut skel)?;
 
         let out = unsafe {
             // SAFETY: initialising field by field. open_object is already "initialised" (it's

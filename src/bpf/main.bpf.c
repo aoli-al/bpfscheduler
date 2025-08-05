@@ -56,6 +56,75 @@ const volatile u64 kprobe_delays_max_ns = 2;
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
+/*
+ * Power law distribution lookup table
+ * This replaces the C++ std::discrete_distribution functionality
+ * The table stores cumulative distribution values scaled by CHAOS_POWER_LAW_SCALE
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, CHAOS_POWER_LAW_SIZE);
+	__type(key, u32);
+	__type(value, u64);
+} chaos_power_law_cdf SEC(".maps");
+
+/*
+ * Sample from power law distribution using inverse transform sampling
+ * Returns index in range [0, CHAOS_POWER_LAW_SIZE-1]
+ */
+static __always_inline u32 sample_power_law_distribution(void)
+{
+	u32 random_val = bpf_get_prandom_u32();
+	u64 target = ((u64)random_val * CHAOS_POWER_LAW_SCALE) >> 32;
+	
+	u32 left = 0;
+	u32 right = CHAOS_POWER_LAW_SIZE - 1;
+	u32 result = 0;
+	
+	/* Binary search through the CDF table */
+	#pragma unroll
+	for (int i = 0; i < 17; i++) { /* log2(50000) ≈ 16, so 17 iterations is safe */
+		if (left >= right)
+			break;
+			
+		u32 mid = left + (right - left) / 2;
+		u64 *cdf_val = bpf_map_lookup_elem(&chaos_power_law_cdf, &mid);
+		
+		if (!cdf_val) {
+			result = mid;
+			break;
+		}
+		
+		if (*cdf_val < target) {
+			left = mid + 1;
+			result = mid + 1;
+		} else {
+			right = mid;
+			result = mid;
+		}
+	}
+	
+	/* Clamp result to valid range */
+	if (result >= CHAOS_POWER_LAW_SIZE)
+		result = CHAOS_POWER_LAW_SIZE - 1;
+		
+	return result;
+}
+
+/*
+ * Example usage of the power law distribution
+ * This function demonstrates how to use the power law sampling
+ */
+static __always_inline u64 get_power_law_delay_ns(u64 base_delay_ns, u64 max_multiplier)
+{
+	u32 sample = sample_power_law_distribution();
+	
+	/* Convert sample to a multiplier in range [1, max_multiplier] */
+	u64 multiplier = 1 + (sample * max_multiplier) / CHAOS_POWER_LAW_SIZE;
+	
+	return base_delay_ns * multiplier;
+}
+
 enum chaos_timer_callbacks {
 	CHAOS_TIMER_CHECK_QUEUES,
 	CHAOS_MAX_TIMERS,
@@ -259,11 +328,17 @@ __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted,
                                 u64 enq_flags,
                                 struct chaos_task_ctx *taskc __arg_nonnull,
                                 u64 min_ns, u64 max_ns) {
-  u64 rand64 = ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
-
   u64 vtime = bpf_ktime_get_ns() + min_ns;
+  
   if (min_ns != max_ns) {
-    vtime += rand64 % (max_ns - min_ns);
+    /* Option 1: Use uniform distribution (original behavior) */
+    // u64 rand64 = ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
+    // vtime += rand64 % (max_ns - min_ns);
+    
+    /* Option 2: Use power law distribution for delay scaling */
+    u64 base_delay = max_ns - min_ns;
+    u64 power_law_delay = get_power_law_delay_ns(base_delay / 100, 10); /* Scale by 1/100, max 10x multiplier */
+    vtime += power_law_delay;
   }
 
   bpf_printk("chaos: task[%d, %s] enqueued new vtime %llu", p->pid, p->comm,
@@ -688,7 +763,7 @@ __always_inline int mutex_lock_handler(struct pt_regs *ctx)
 }
 
 
-SEC("uprobe//nix/store/g2jzxk3s7cnkhh8yq55l4fbvf639zy37-glibc-2.40-66/lib/libc.so.6:pthread_mutex_lock")
+SEC("uprobe//nix/store/lmn7lwydprqibdkghw7wgcn21yhllz13-glibc-2.40-66/lib/libc.so.6:pthread_mutex_lock")
 int libc_pthread_mutex_lock(struct pt_regs *ctx)
 {
 	return mutex_lock_handler(ctx);
